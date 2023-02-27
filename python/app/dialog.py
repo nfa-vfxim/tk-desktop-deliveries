@@ -280,7 +280,7 @@ class AppDialog(QtGui.QWidget):
 
             fields = {}
 
-            fields["Projectcode"] = project_code
+            fields["projectcode"] = project_code
             fields["Sequence"] = sequence_name
             fields["Shot"] = shot_name
             fields["version"] = version_number

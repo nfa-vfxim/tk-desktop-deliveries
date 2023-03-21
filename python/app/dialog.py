@@ -296,7 +296,7 @@ class AppDialog(QtGui.QWidget):
                 )
                 os.makedirs(delivery_folder)
 
-            for frame in range(first_frame, last_frame):
+            for frame in range(first_frame, last_frame + 1):
                 publish_file = sequence_path % frame
                 delivery_file = delivery_path % frame
 

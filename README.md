@@ -5,7 +5,8 @@
 This app will get all shots with the "Ready for Delivery" status, and copy the publishes to the delivery folder with the correct naming convention. Currently used at the Netherlands Film Academy.
 
 ## User interface
-![tk-desktop-deliveries](./resources/tk-desktop-deliveries.png)
+![delivery_export](https://github.com/nfa-vfxim/tk-desktop-deliveries/assets/63094424/46c7fbab-84c8-401e-8627-eb25b315b313)
+
 
 ## Requirements
 * This app will need a sg_projectcode field on the project in ShotGrid

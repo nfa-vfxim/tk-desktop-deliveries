@@ -30,17 +30,10 @@ class tkShotGridDeliveries(Application):
     """
 
     def init_app(self):
-        """
-        Called as the application is being initialized
-        """
-
-        # Register command
+        """Called as the application is being initialized"""
         self.engine.register_command("Deliveries", self.deliveries)
 
     def deliveries(self):
-        """This function will run the application"""
-        # Import application
+        """This function will open the application"""
         app_payload = self.import_module("app")
-
-        # Run application
-        app_payload.dialog.show_dialog(self)
+        app_payload.controller.open_delivery_app(self)

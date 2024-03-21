@@ -21,4 +21,4 @@
 # SOFTWARE.
 
 
-from . import dialog
+from . import controller

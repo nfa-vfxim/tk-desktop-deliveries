@@ -23,7 +23,7 @@
 """Controller for delivery tool, written by Mervin van Brakel 2024"""
 
 import sgtk
-from sgtk.platform.qt5 import QtWidgets
+from .qt_compat import QtWidgets
 
 from . import model, view
 

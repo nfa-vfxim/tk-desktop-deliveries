@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from sgtk.platform.qt5 import QtCore
+from .qt_compat import QtCore
 
 
 class ValidationError(Exception):

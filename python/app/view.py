@@ -25,7 +25,7 @@
 
 from pathlib import Path
 
-from sgtk.platform.qt5 import QtCore, QtSvg, QtWidgets
+from .qt_compat import QSvgWidget, QtCore, QtWidgets
 
 SCRIPT_LOCATION: Path = Path(__file__).parent
 
@@ -148,7 +148,7 @@ class DeliveryView:
         loading_widget_layout.setAlignment(QtCore.Qt.AlignCenter)
         self.loading_widget.setLayout(loading_widget_layout)
 
-        loading_spinner = QtSvg.QSvgWidget(
+        loading_spinner = QSvgWidget(
             str(
                 SCRIPT_LOCATION / "../.." / "resources" / "loading_spinner.svg"
             )

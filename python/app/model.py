@@ -29,8 +29,10 @@ on, or changes, the shot status unless configured to do so.
 
 from __future__ import annotations
 
+import getpass
 import os
 import re
+from datetime import datetime
 import tempfile
 from pathlib import Path
 
@@ -68,18 +70,53 @@ class DeliveryModel:
         self.shots = []
 
     # ------------------------------------------------------------------ misc
-    def open_delivery_folder(self) -> None:
-        """Finds the correct path and opens the delivery folder."""
+    def get_delivery_folder(self) -> str:
+        """Returns the project's delivery folder (created if needed)."""
         template = self._app.get_template("delivery_folder")
-
-        roots = self.context.sgtk.roots
-        root_name = self._app.get_setting("default_root")
-
-        project_location = roots.get(root_name)
+        project_location = self.context.sgtk.roots.get(
+            self._app.get_setting("default_root")
+        )
         delivery_location = template.apply_fields(project_location)
-
         os.makedirs(delivery_location, exist_ok=True)
-        os.startfile(delivery_location)
+        return delivery_location
+
+    def open_delivery_folder(self) -> None:
+        """Opens the delivery folder."""
+        os.startfile(self.get_delivery_folder())
+
+    def write_report(self, results: list) -> str:
+        """Writes delivery_report.txt in the delivery folder (overwrites it).
+
+        Args:
+            results: list of (shot dict, level, message); level is
+                "ok", "warning" or "error".
+
+        Returns:
+            Path of the report.
+        """
+        path = Path(self.get_delivery_folder()) / "delivery_report.txt"
+        labels = {"error": "ERROR", "warning": "WARNING", "ok": "OK"}
+        order = {"error": 0, "warning": 1, "ok": 2}
+        counts = {level: sum(1 for _, l, _ in results if l == level) for level in order}
+
+        lines = [
+            "Delivery report",
+            f"Date:    {datetime.now():%Y-%m-%d %H:%M}",
+            f"By:      {getpass.getuser()}",
+            f"Shots:   {len(results)}  (errors: {counts['error']}, "
+            f"warnings: {counts['warning']}, ok: {counts['ok']})",
+            "",
+        ]
+        for shot, level, message in sorted(
+            results,
+            key=lambda r: (order[r[1]], _natural_key(r[0]["sequence"]), _natural_key(r[0]["shot"])),
+        ):
+            version = f"v{shot['version_number']:03d}" if shot.get("version_number") else "----"
+            lines.append(
+                f"{labels[level]:<8} {shot['sequence']}_{shot['shot']:<10} {version}  {message}"
+            )
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(path)
 
     def get_project_code(self) -> str:
         """Gets the ShotGrid project code."""
@@ -460,9 +497,19 @@ class ExportShotsThread(QtCore.QThread):
         super().__init__()
         self.model = model
         self.shots = shots
+        self.report_path = None
 
     def run(self):
         delivered, warned, failed = 0, 0, 0
+        results = []  # (shot, level, message) for the report
+
+        def report(shot, level, text):
+            results.append((shot, level, text))
+            signal = {"ok": self.shot_message, "warning": self.shot_warning}.get(
+                level, self.shot_error
+            )
+            signal.emit(shot["id"], text)
+
         for shot in self.shots:
             label = f"{shot['sequence']} {shot['shot']}"
             try:
@@ -475,25 +522,29 @@ class ExportShotsThread(QtCore.QThread):
                     warned += 1
                     text = " ".join([shot["note"]] + warnings)
                     self.model.logger.warning(f"{label}: {text}")
-                    self.shot_error.emit(shot["id"], text)
+                    report(shot, "error", text)
                 elif warnings:
                     warned += 1
                     text = "Delivered, but: " + " ".join(warnings)
                     self.model.logger.warning(f"{label}: {text}")
-                    self.shot_warning.emit(shot["id"], text)
+                    report(shot, "warning", text)
                 else:
-                    self.shot_message.emit(shot["id"], "Delivered!")
+                    report(shot, "ok", "Delivered.")
             except AlreadyDelivered:
-                self.model.logger.info(f"{label}: already delivered, skipped.")
-                self.shot_message.emit(shot["id"], "Already delivered.")
+                self.model.logger.info(f"{label}: already in delivery folder, skipped.")
+                report(shot, "ok", "Already in delivery folder, not copied again.")
             except ValidationError as error:
                 self.model.logger.error(f"{label}: {error}")
-                self.shot_error.emit(shot["id"], str(error))
+                report(shot, "error", str(error))
                 failed += 1
             except Exception as error:
                 self.model.logger.exception(f"{label}: unexpected error")
-                self.shot_error.emit(
-                    shot["id"], f"Unexpected error: {error}. Check the logs."
-                )
+                report(shot, "error", f"Unexpected error: {error}. Check the logs.")
                 failed += 1
+
+        try:
+            self.report_path = self.model.write_report(results)
+        except Exception:
+            self.model.logger.exception("Could not write delivery report.")
+            self.report_path = None
         self.export_finished.emit(delivered, warned, failed)

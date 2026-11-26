@@ -83,7 +83,7 @@ class DeliveryController(QtWidgets.QWidget):
         v.collapse_button.clicked.connect(v.tree.collapseAll)
         v.filter_field.textChanged.connect(v.apply_filter)
         v.thumbnails_checkbox.toggled.connect(v.set_thumbnails_visible)
-        v.tree.itemChanged.connect(lambda *_: self.update_selection_label())
+        v.tree.itemChanged.connect(self.item_changed)
 
     # --------------------------------------------------------------- loading
     def load_shots(self):
@@ -134,6 +134,10 @@ class DeliveryController(QtWidgets.QWidget):
         self.view.set_busy(False)
         self.view.status_label.setText(f"Error while loading shots: {error}")
 
+    def item_changed(self, item, column):
+        self.view.sync_check_states(item, column)
+        self.update_selection_label()
+
     def update_selection_label(self):
         if self.export_thread and self.export_thread.isRunning():
             return
@@ -183,7 +187,10 @@ class DeliveryController(QtWidgets.QWidget):
         self.view.set_busy(False)
         text = f"Delivered {delivered} shot(s)."
         if warned:
-            text += f" {warned} with warnings (yellow)."
+            text += f" {warned} with warnings."
         if failed:
-            text += f" {failed} shot(s) failed, see the Result column."
+            text += f" {failed} failed."
+        report = self.export_thread.report_path if self.export_thread else None
+        if report:
+            text += " Report: delivery_report.txt in the delivery folder."
         self.view.status_label.setText(text)

@@ -164,10 +164,11 @@ class DeliveryView:
         for shot in shots:
             if sequence_item is None or sequence_item.text(COL_SHOT) != shot["sequence"]:
                 sequence_item = QtWidgets.QTreeWidgetItem(self.tree, [shot["sequence"]])
+                # Sequence checkbox is handled by sync_check_states() instead
+                # of Qt's auto-tristate: auto-tristate breaks as soon as a
+                # sequence holds a shot that can't be ticked.
                 sequence_item.setFlags(
-                    sequence_item.flags()
-                    | QtCore.Qt.ItemIsUserCheckable
-                    | QtCore.Qt.ItemIsAutoTristate
+                    sequence_item.flags() | QtCore.Qt.ItemIsUserCheckable
                 )
                 sequence_item.setCheckState(COL_SHOT, QtCore.Qt.Unchecked)
                 font = sequence_item.font(COL_SHOT)
@@ -179,7 +180,50 @@ class DeliveryView:
 
         for item in self.sequence_items:
             item.setExpanded(True)
+            self._update_sequence_state(item)
         self.tree.blockSignals(False)
+
+    def _checkable_children(self, sequence_item):
+        return [
+            sequence_item.child(i)
+            for i in range(sequence_item.childCount())
+            if sequence_item.child(i).flags() & QtCore.Qt.ItemIsUserCheckable
+        ]
+
+    def _update_sequence_state(self, sequence_item) -> None:
+        children = self._checkable_children(sequence_item)
+        checked = sum(
+            1 for c in children if c.checkState(COL_SHOT) == QtCore.Qt.Checked
+        )
+        if children and checked == len(children):
+            state = QtCore.Qt.Checked
+        elif checked:
+            state = QtCore.Qt.PartiallyChecked
+        else:
+            state = QtCore.Qt.Unchecked
+        sequence_item.setCheckState(COL_SHOT, state)
+
+    def sync_check_states(self, item, column) -> None:
+        """Keeps sequence and shot checkboxes in sync after a click."""
+        if column != COL_SHOT:
+            return
+        self.tree.blockSignals(True)
+        try:
+            if item.parent() is None:
+                # Sequence clicked: (un)tick all its tickable, visible shots.
+                state = (
+                    QtCore.Qt.Unchecked
+                    if item.checkState(COL_SHOT) == QtCore.Qt.Unchecked
+                    else QtCore.Qt.Checked
+                )
+                for child in self._checkable_children(item):
+                    if not child.isHidden():
+                        child.setCheckState(COL_SHOT, state)
+                self._update_sequence_state(item)
+            else:
+                self._update_sequence_state(item.parent())
+        finally:
+            self.tree.blockSignals(False)
 
     def add_shot_item(self, parent: QtWidgets.QTreeWidgetItem, shot: dict) -> None:
         frames = (
@@ -270,6 +314,10 @@ class DeliveryView:
             item = refs["item"]
             if not item.isHidden() and item.flags() & QtCore.Qt.ItemIsUserCheckable:
                 item.setCheckState(COL_SHOT, state)
+        self.tree.blockSignals(True)
+        for sequence_item in self.sequence_items:
+            self._update_sequence_state(sequence_item)
+        self.tree.blockSignals(False)
 
     def apply_filter(self, text: str) -> None:
         text = text.strip().lower()

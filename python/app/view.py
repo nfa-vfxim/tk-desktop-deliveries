@@ -35,14 +35,15 @@ COLOR_OK = "#8BFF3E"
 COLOR_ERROR = "#FF3E3E"
 COLOR_MUTED = "#888888"
 
-COL_SHOT, COL_STATUS, COL_VERSION, COL_FRAMES, COL_PROGRESS, COL_RESULT = range(6)
+COL_SHOT, COL_STATUS, COL_VERSION, COL_FRAMES, COL_RESULT = range(5)
+NUM_COLUMNS = 5
 
 
 class DeliveryView:
     """All Qt UI for the ShotGrid delivery application."""
 
     def __init__(self) -> None:
-        # shot id -> {"item": QTreeWidgetItem, "progress": QProgressBar}
+        # shot id -> {"item": QTreeWidgetItem}
         self.shot_items = {}
         self.sequence_items = []
 
@@ -93,7 +94,7 @@ class DeliveryView:
     def get_tree_widget(self) -> QtWidgets.QTreeWidget:
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderLabels(
-            ["Shot", "Status", "Version", "Frames", "Progress", "Result"]
+            ["Shot", "Status", "Version", "Frames", "Result"]
         )
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
@@ -102,8 +103,7 @@ class DeliveryView:
         self.tree.setColumnWidth(COL_SHOT, 200)
         self.tree.setColumnWidth(COL_STATUS, 70)
         self.tree.setColumnWidth(COL_VERSION, 70)
-        self.tree.setColumnWidth(COL_FRAMES, 100)
-        self.tree.setColumnWidth(COL_PROGRESS, 150)
+        self.tree.setColumnWidth(COL_FRAMES, 110)
         return self.tree
 
     def get_loading_widget(self) -> QtWidgets.QWidget:
@@ -178,7 +178,7 @@ class DeliveryView:
         )
         version = f"v{shot['version_number']:03d}" if shot["version_number"] else "-"
         item = QtWidgets.QTreeWidgetItem(
-            parent, [shot["shot"], shot["status"] or "", version, frames, "", ""]
+            parent, [shot["shot"], shot["status"] or "", version, frames, ""]
         )
         item.setData(COL_SHOT, QtCore.Qt.UserRole, shot["id"])
 
@@ -186,7 +186,7 @@ class DeliveryView:
             # Not deliverable: show why, and don't allow checking it.
             item.setFlags(item.flags() & ~QtCore.Qt.ItemIsUserCheckable)
             item.setText(COL_RESULT, shot["load_error"])
-            for column in range(6):
+            for column in range(NUM_COLUMNS):
                 item.setForeground(column, _brush(COLOR_MUTED))
         else:
             item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
@@ -197,20 +197,7 @@ class DeliveryView:
             if shot["version_name"]:
                 item.setToolTip(COL_VERSION, shot["version_name"])
 
-        progress = QtWidgets.QProgressBar()
-        progress.setMaximumHeight(14)
-        progress.setTextVisible(False)
-        progress.setStyleSheet(
-            f"QProgressBar::chunk {{background-color: {COLOR_OK};}} "
-            "QProgressBar {background-color: #444444; border: none;}"
-        )
-        if shot["first_frame"] is not None and shot["last_frame"] is not None:
-            progress.setRange(shot["first_frame"], shot["last_frame"])
-            progress.setValue(shot["first_frame"])
-        progress.hide()
-        self.tree.setItemWidget(item, COL_PROGRESS, progress)
-
-        self.shot_items[shot["id"]] = {"item": item, "progress": progress}
+        self.shot_items[shot["id"]] = {"item": item, "shot": shot}
 
     # ---------------------------------------------------------------- state
     def checked_shot_ids(self) -> list[int]:
@@ -248,22 +235,23 @@ class DeliveryView:
         refs["item"].setText(COL_RESULT, message)
         refs["item"].setToolTip(COL_RESULT, message)
         refs["item"].setForeground(COL_RESULT, _brush(COLOR_ERROR if error else COLOR_OK))
-        if error:
-            refs["progress"].hide()
 
     def set_shot_progress(self, shot_id: int, frame: int) -> None:
         refs = self.shot_items.get(shot_id)
-        if refs:
-            refs["progress"].show()
-            refs["progress"].setValue(frame)
+        if not refs:
+            return
+        shot = refs["shot"]
+        total = shot["last_frame"] - shot["first_frame"] + 1
+        done = frame - shot["first_frame"] + 1
+        percent = int(done * 100 / total) if total else 100
+        refs["item"].setText(COL_RESULT, f"Delivering... {done}/{total} frames ({percent}%)")
+        refs["item"].setForeground(COL_RESULT, _brush(COLOR_OK))
 
     def reset_results(self, shot_ids: list[int]) -> None:
         for shot_id in shot_ids:
             refs = self.shot_items[shot_id]
             refs["item"].setText(COL_RESULT, "Waiting...")
             refs["item"].setForeground(COL_RESULT, _brush(COLOR_MUTED))
-            refs["progress"].setValue(refs["progress"].minimum())
-            refs["progress"].hide()
 
     def set_busy(self, busy: bool) -> None:
         for widget in (

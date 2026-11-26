@@ -28,7 +28,7 @@ only the checked shots, without depending on the shot status.
 
 import sgtk
 
-from .qt_compat import QtWidgets
+from .qt_compat import QtCore, QtWidgets
 from . import model, view
 
 logger = sgtk.platform.get_logger(__name__)
@@ -51,6 +51,25 @@ class DeliveryController(QtWidgets.QWidget):
         self.export_thread = None
         self.connect_signals()
         self.load_shots()
+        QtCore.QTimer.singleShot(0, self.bring_to_front)
+
+    def bring_to_front(self):
+        """Raises the dialog above other applications when it opens.
+
+        The app runs in a separate process from the Desktop window, so Windows
+        doesn't give it focus by itself. Briefly setting 'stay on top' forces
+        the window to the front; it's removed again right after.
+        """
+        window = self.window()
+        flags = window.windowFlags()
+        window.setWindowFlags(flags | QtCore.Qt.WindowStaysOnTopHint)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        window.setWindowFlags(flags)
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     def connect_signals(self):
         v = self.view
@@ -81,6 +100,8 @@ class DeliveryController(QtWidgets.QWidget):
     def loading_shots_successful(self, shots):
         self.view.loading_widget.hide()
         self.view.set_busy(False)
+        # Only list shots that can actually be delivered (have a published file).
+        shots = [shot for shot in shots if not shot["load_error"]]
         self.shots_by_id = {shot["id"]: shot for shot in shots}
         self.view.populate_shots(shots)
         self.view.apply_filter(self.view.filter_field.text())

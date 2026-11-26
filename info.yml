@@ -35,15 +35,25 @@ configuration:
     default_value: "primary"
     description: "Default roots to get to get project location on disk."
 
-  delivery_status:
+  preselect_status:
     type: str
     default_value: "rfd"
-    description: Status that will be added to the ready for delivery list.
+    description: >
+      Shots with this status are ticked by default when the app opens.
+      All shots are always listed and can be (de)selected regardless of status.
+      Set to an empty string to start with nothing selected.
+
+  set_delivered_status:
+    type: bool
+    default_value: false
+    description: >
+      If true, the shot status is set to delivered_status after a successful
+      delivery. Off by default so delivering never changes shot statuses.
 
   delivered_status:
     type: str
     default_value: "fin"
-    description: Status to set the shot to if the shot has been delivered.
+    description: Status to set the shot to after delivery (only if set_delivered_status is true).
 
 
 # this app works in all engines - it does not contain

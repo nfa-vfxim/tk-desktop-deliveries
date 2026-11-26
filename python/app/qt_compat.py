@@ -32,12 +32,12 @@ is exported from here so the rest of the app doesn't have to care.
 """
 
 try:
-    from sgtk.platform.qt6 import QtCore, QtSvgWidgets, QtWidgets
+    from sgtk.platform.qt6 import QtCore, QtGui, QtSvgWidgets, QtWidgets
 
     QSvgWidget = QtSvgWidgets.QSvgWidget
 except ImportError:
-    from sgtk.platform.qt5 import QtCore, QtSvg, QtWidgets
+    from sgtk.platform.qt5 import QtCore, QtGui, QtSvg, QtWidgets
 
     QSvgWidget = QtSvg.QSvgWidget
 
-__all__ = ["QtCore", "QtWidgets", "QSvgWidget"]
+__all__ = ["QtCore", "QtGui", "QtWidgets", "QSvgWidget"]

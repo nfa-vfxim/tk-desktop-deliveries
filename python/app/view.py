@@ -20,202 +20,260 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+"""View for delivery tool, written by Mervin van Brakel 2024.
 
-"""View for delivery tool, written by Mervin van Brakel 2024"""
+Reworked: tree of all shots grouped per sequence, with checkboxes.
+"""
 
 from pathlib import Path
 
-from .qt_compat import QSvgWidget, QtCore, QtWidgets
+from .qt_compat import QSvgWidget, QtCore, QtGui, QtWidgets
 
 SCRIPT_LOCATION: Path = Path(__file__).parent
 
+COLOR_OK = "#8BFF3E"
+COLOR_ERROR = "#FF3E3E"
+COLOR_MUTED = "#888888"
+
+COL_SHOT, COL_STATUS, COL_VERSION, COL_FRAMES, COL_PROGRESS, COL_RESULT = range(6)
+
 
 class DeliveryView:
-    """View for the ShotGrid delivery application.
-
-    This view has all functions related to the Qt UI.
-    """
+    """All Qt UI for the ShotGrid delivery application."""
 
     def __init__(self) -> None:
-        self.shot_widget_references = {}
+        # shot id -> {"item": QTreeWidgetItem, "progress": QProgressBar}
+        self.shot_items = {}
+        self.sequence_items = []
 
     def create_user_interface(self, main_widget: QtWidgets.QWidget):
-        """Creates the UI of the window.
-
-        Args:
-            main_widget: The main application widget. We get this from the controller because
-            I couldn't get it to work properly otherwise..
-        """
         QtWidgets.QWidget.__init__(main_widget)
+        main_widget.resize(900, 650)
 
         self.layout = QtWidgets.QVBoxLayout(main_widget)
         self.layout.addWidget(self.get_explanation_widget())
-        self.layout.addWidget(self.get_shots_list_widget())
+        self.layout.addWidget(self.get_toolbar_widget())
+        self.layout.addWidget(self.get_tree_widget(), 1)
+        self.layout.addWidget(self.get_loading_widget())
         self.layout.addWidget(self.get_buttons_widget())
 
     @staticmethod
     def get_explanation_widget() -> QtWidgets.QWidget:
-        """Gets the explanation widget of the layout.
-
-        Returns:
-            Widget containing explanation.
-        """
-        explanation_widget = QtWidgets.QWidget()
-        explanation_widget_layout = QtWidgets.QVBoxLayout()
-        explanation_widget.setLayout(explanation_widget_layout)
-
-        explanation_label_1 = QtWidgets.QLabel(
-            "Welcome to the delivery application!"
+        label = QtWidgets.QLabel(
+            "Select the shots you want to deliver. The latest version of each "
+            "selected shot is delivered to the delivery folder with the correct "
+            "naming convention. Shot statuses are not changed."
         )
-        explanation_widget_layout.addWidget(explanation_label_1)
+        label.setWordWrap(True)
+        return label
 
-        explanation_label_2 = QtWidgets.QLabel(
-            "This application is used to create the final return files that we send back to our editors."
+    def get_toolbar_widget(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.filter_field = QtWidgets.QLineEdit()
+        self.filter_field.setPlaceholderText("Filter sequence or shot...")
+        self.filter_field.setClearButtonEnabled(True)
+        layout.addWidget(self.filter_field, 1)
+
+        self.select_all_button = QtWidgets.QPushButton("Select all")
+        self.select_none_button = QtWidgets.QPushButton("Select none")
+        self.expand_button = QtWidgets.QPushButton("Expand all")
+        self.collapse_button = QtWidgets.QPushButton("Collapse all")
+        for button in (
+            self.select_all_button,
+            self.select_none_button,
+            self.expand_button,
+            self.collapse_button,
+        ):
+            layout.addWidget(button)
+        return widget
+
+    def get_tree_widget(self) -> QtWidgets.QTreeWidget:
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setHeaderLabels(
+            ["Shot", "Status", "Version", "Frames", "Progress", "Result"]
         )
-        explanation_widget_layout.addWidget(explanation_label_2)
-
-        explanation_label_3 = QtWidgets.QLabel(
-            "Only shots with the status 'Ready for Delivery' show up in this program."
-        )
-        explanation_widget_layout.addWidget(explanation_label_3)
-
-        explanation_label_4 = QtWidgets.QLabel(
-            "This program only exports the latest version of the shots, so make sure shots are published correctly."
-        )
-        explanation_widget_layout.addWidget(explanation_label_4)
-
-        return explanation_widget
-
-    def get_shots_list_widget(self) -> QtWidgets.QWidget:
-        """Gets the shot list widget of the layout.
-
-        Returns:
-            Widget containing shot list.
-        """
-        self.shots_list_scroll_area = QtWidgets.QScrollArea()
-        self.shots_list_widget = QtWidgets.QWidget()
-        self.shots_list_widget_layout = QtWidgets.QVBoxLayout()
-        self.shots_list_widget.setLayout(self.shots_list_widget_layout)
-
-        self.shots_list_widget.setStyleSheet("background-color:#2A2A2A;")
-        self.shots_list_widget_layout.addWidget(self.get_loading_widget())
-
-        self.shots_list_scroll_area.setWidget(self.shots_list_widget)
-        self.shots_list_scroll_area.setWidgetResizable(True)
-
-        return self.shots_list_scroll_area
-
-    def get_buttons_widget(self) -> QtWidgets.QWidget:
-        """Gets the buttons widget of the layout.
-
-        Returns:
-            Widget containing buttons.
-        """
-        buttons_widget = QtWidgets.QWidget()
-        buttons_widget_layout = QtWidgets.QVBoxLayout()
-        buttons_widget.setLayout(buttons_widget_layout)
-
-        self.final_validation_label = QtWidgets.QLabel(
-            "Some shots are not exported due to errors!"
-        )
-        self.final_validation_label.hide()
-        self.final_validation_label.setStyleSheet(
-            "color: '#FF3E3E'; font: bold; font-size: 12px"
-        )
-        buttons_widget_layout.addWidget(self.final_validation_label)
-
-        self.reload_button = QtWidgets.QPushButton("Reload shot list")
-        buttons_widget_layout.addWidget(self.reload_button)
-
-        self.export_shots_button = QtWidgets.QPushButton("Export shots")
-        buttons_widget_layout.addWidget(self.export_shots_button)
-
-        self.open_delivery_folder_button = QtWidgets.QPushButton(
-            "Open delivery folder"
-        )
-        buttons_widget_layout.addWidget(self.open_delivery_folder_button)
-
-        return buttons_widget
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        header = self.tree.header()
+        header.setStretchLastSection(True)
+        self.tree.setColumnWidth(COL_SHOT, 200)
+        self.tree.setColumnWidth(COL_STATUS, 70)
+        self.tree.setColumnWidth(COL_VERSION, 70)
+        self.tree.setColumnWidth(COL_FRAMES, 100)
+        self.tree.setColumnWidth(COL_PROGRESS, 150)
+        return self.tree
 
     def get_loading_widget(self) -> QtWidgets.QWidget:
-        """Gets the loading widget for the layout.
-
-        Returns:
-            Widget containing loading widgets.
-        """
         self.loading_widget = QtWidgets.QWidget()
-        loading_widget_layout = QtWidgets.QVBoxLayout()
-        loading_widget_layout.setAlignment(QtCore.Qt.AlignCenter)
-        self.loading_widget.setLayout(loading_widget_layout)
-
-        loading_spinner = QSvgWidget(
-            str(
-                SCRIPT_LOCATION / "../.." / "resources" / "loading_spinner.svg"
-            )
+        layout = QtWidgets.QVBoxLayout(self.loading_widget)
+        spinner = QSvgWidget(
+            str(SCRIPT_LOCATION / "../.." / "resources" / "loading_spinner.svg")
         )
-        loading_spinner.setFixedSize(100, 100)
-        loading_widget_layout.addWidget(
-            loading_spinner, 0, QtCore.Qt.AlignHCenter
-        )
-
+        spinner.setFixedSize(60, 60)
+        layout.addWidget(spinner, 0, QtCore.Qt.AlignHCenter)
+        layout.addWidget(QtWidgets.QLabel("Loading shots..."), 0, QtCore.Qt.AlignHCenter)
+        self.loading_widget.hide()
         return self.loading_widget
 
-    def get_shot_widget(self, shot: dict) -> QtWidgets.QWidget:
-        """Gets the shot widget for the layout. It also stores this
-        widget in the reference list so we can update its UI later.
+    def get_buttons_widget(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        Args:
-            shot: Shot information dictionary
+        self.status_label = QtWidgets.QLabel("")
+        layout.addWidget(self.status_label, 1)
 
-        Returns:
-            Widget for shot information.
-        """
-        self.shot_widget_references[shot["id"]] = {}
+        self.reload_button = QtWidgets.QPushButton("Reload")
+        self.open_delivery_folder_button = QtWidgets.QPushButton("Open delivery folder")
+        self.export_shots_button = QtWidgets.QPushButton("Deliver selected")
+        self.export_shots_button.setDefault(True)
+        for button in (
+            self.reload_button,
+            self.open_delivery_folder_button,
+            self.export_shots_button,
+        ):
+            layout.addWidget(button)
+        return widget
 
-        self.shot_widget_references[shot["id"]]["widget"] = QtWidgets.QWidget()
-        shot_widget_vertical_layout = QtWidgets.QVBoxLayout()
-        self.shot_widget_references[shot["id"]]["widget"].setLayout(
-            shot_widget_vertical_layout
+    # ------------------------------------------------------------- populate
+    def clear_shots(self) -> None:
+        self.tree.clear()
+        self.shot_items = {}
+        self.sequence_items = []
+
+    def populate_shots(self, shots: list[dict]) -> None:
+        """Fills the tree. Shots must already be sorted by sequence."""
+        self.tree.blockSignals(True)
+        self.clear_shots()
+
+        sequence_item = None
+        for shot in shots:
+            if sequence_item is None or sequence_item.text(COL_SHOT) != shot["sequence"]:
+                sequence_item = QtWidgets.QTreeWidgetItem(self.tree, [shot["sequence"]])
+                sequence_item.setFlags(
+                    sequence_item.flags()
+                    | QtCore.Qt.ItemIsUserCheckable
+                    | QtCore.Qt.ItemIsAutoTristate
+                )
+                sequence_item.setCheckState(COL_SHOT, QtCore.Qt.Unchecked)
+                font = sequence_item.font(COL_SHOT)
+                font.setBold(True)
+                sequence_item.setFont(COL_SHOT, font)
+                self.sequence_items.append(sequence_item)
+
+            self.add_shot_item(sequence_item, shot)
+
+        for item in self.sequence_items:
+            item.setExpanded(True)
+        self.tree.blockSignals(False)
+
+    def add_shot_item(self, parent: QtWidgets.QTreeWidgetItem, shot: dict) -> None:
+        frames = (
+            f"{shot['first_frame']} - {shot['last_frame']}"
+            if shot["first_frame"] is not None and shot["last_frame"] is not None
+            else "-"
         )
+        version = f"v{shot['version_number']:03d}" if shot["version_number"] else "-"
+        item = QtWidgets.QTreeWidgetItem(
+            parent, [shot["shot"], shot["status"] or "", version, frames, "", ""]
+        )
+        item.setData(COL_SHOT, QtCore.Qt.UserRole, shot["id"])
 
-        shot_name_label = QtWidgets.QLabel(
-            f"Sequence {shot['sequence']} - Shot {shot['shot']}."
-        )
-        shot_name_label.setStyleSheet("font: bold; font-size: 14px")
-        shot_widget_vertical_layout.addWidget(shot_name_label)
+        if shot["load_error"]:
+            # Not deliverable: show why, and don't allow checking it.
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemIsUserCheckable)
+            item.setText(COL_RESULT, shot["load_error"])
+            for column in range(6):
+                item.setForeground(column, _brush(COLOR_MUTED))
+        else:
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                COL_SHOT,
+                QtCore.Qt.Checked if shot["preselected"] else QtCore.Qt.Unchecked,
+            )
+            if shot["version_name"]:
+                item.setToolTip(COL_VERSION, shot["version_name"])
 
-        shot_info_label = QtWidgets.QLabel(
-            f"Frames {shot['first_frame']} - {shot['last_frame']}. Version {shot['version_number']}."
+        progress = QtWidgets.QProgressBar()
+        progress.setMaximumHeight(14)
+        progress.setTextVisible(False)
+        progress.setStyleSheet(
+            f"QProgressBar::chunk {{background-color: {COLOR_OK};}} "
+            "QProgressBar {background-color: #444444; border: none;}"
         )
-        shot_info_label.setStyleSheet("font-size: 12px")
-        shot_widget_vertical_layout.addWidget(shot_info_label)
+        if shot["first_frame"] is not None and shot["last_frame"] is not None:
+            progress.setRange(shot["first_frame"], shot["last_frame"])
+            progress.setValue(shot["first_frame"])
+        progress.hide()
+        self.tree.setItemWidget(item, COL_PROGRESS, progress)
 
-        self.shot_widget_references[shot["id"]]["validation_label"] = (
-            QtWidgets.QLabel("Shot ready for export!")
-        )
-        self.shot_widget_references[shot["id"]][
-            "validation_label"
-        ].setStyleSheet("color: '#8BFF3E'; font-size: 10px;")
-        shot_widget_vertical_layout.addWidget(
-            self.shot_widget_references[shot["id"]]["validation_label"]
-        )
+        self.shot_items[shot["id"]] = {"item": item, "progress": progress}
 
-        self.shot_widget_references[shot["id"]][
-            "shot_progress_bar"
-        ] = QtWidgets.QProgressBar()
-        self.shot_widget_references[shot["id"]][
-            "shot_progress_bar"
-        ].setMinimum(shot["first_frame"])
-        self.shot_widget_references[shot["id"]][
-            "shot_progress_bar"
-        ].setMaximum(shot["last_frame"])
-        self.shot_widget_references[shot["id"]][
-            "shot_progress_bar"
-        ].setStyleSheet(
-            "QProgressBar::chunk {background-color: #8BFF3E;} QProgressBar {color: black; background-color: #444444; text-align: center;}"
-        )
-        shot_widget_vertical_layout.addWidget(
-            self.shot_widget_references[shot["id"]]["shot_progress_bar"]
-        )
+    # ---------------------------------------------------------------- state
+    def checked_shot_ids(self) -> list[int]:
+        return [
+            shot_id
+            for shot_id, refs in self.shot_items.items()
+            if refs["item"].flags() & QtCore.Qt.ItemIsUserCheckable
+            and refs["item"].checkState(COL_SHOT) == QtCore.Qt.Checked
+        ]
 
-        return self.shot_widget_references[shot["id"]]["widget"]
+    def set_all_checked(self, checked: bool) -> None:
+        """Checks/unchecks all visible deliverable shots."""
+        state = QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked
+        for refs in self.shot_items.values():
+            item = refs["item"]
+            if not item.isHidden() and item.flags() & QtCore.Qt.ItemIsUserCheckable:
+                item.setCheckState(COL_SHOT, state)
+
+    def apply_filter(self, text: str) -> None:
+        text = text.strip().lower()
+        for sequence_item in self.sequence_items:
+            sequence_match = text in sequence_item.text(COL_SHOT).lower()
+            any_visible = False
+            for index in range(sequence_item.childCount()):
+                child = sequence_item.child(index)
+                visible = not text or sequence_match or text in child.text(COL_SHOT).lower()
+                child.setHidden(not visible)
+                any_visible = any_visible or visible
+            sequence_item.setHidden(not any_visible)
+
+    def set_shot_message(self, shot_id: int, message: str, error: bool = False) -> None:
+        refs = self.shot_items.get(shot_id)
+        if not refs:
+            return
+        refs["item"].setText(COL_RESULT, message)
+        refs["item"].setToolTip(COL_RESULT, message)
+        refs["item"].setForeground(COL_RESULT, _brush(COLOR_ERROR if error else COLOR_OK))
+        if error:
+            refs["progress"].hide()
+
+    def set_shot_progress(self, shot_id: int, frame: int) -> None:
+        refs = self.shot_items.get(shot_id)
+        if refs:
+            refs["progress"].show()
+            refs["progress"].setValue(frame)
+
+    def reset_results(self, shot_ids: list[int]) -> None:
+        for shot_id in shot_ids:
+            refs = self.shot_items[shot_id]
+            refs["item"].setText(COL_RESULT, "Waiting...")
+            refs["item"].setForeground(COL_RESULT, _brush(COLOR_MUTED))
+            refs["progress"].setValue(refs["progress"].minimum())
+            refs["progress"].hide()
+
+    def set_busy(self, busy: bool) -> None:
+        for widget in (
+            self.export_shots_button,
+            self.reload_button,
+            self.select_all_button,
+            self.select_none_button,
+        ):
+            widget.setEnabled(not busy)
+
+
+def _brush(color: str):
+    return QtGui.QBrush(QtGui.QColor(color))

@@ -20,137 +20,123 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Controller for delivery tool, written by Mervin van Brakel 2024"""
+"""Controller for delivery tool, written by Mervin van Brakel 2024.
+
+Reworked: shows all shots grouped per sequence with checkboxes and delivers
+only the checked shots, without depending on the shot status.
+"""
 
 import sgtk
-from .qt_compat import QtWidgets
 
+from .qt_compat import QtWidgets
 from . import model, view
 
 logger = sgtk.platform.get_logger(__name__)
 
 
 def open_delivery_app(app_instance):
-    """
-    Opens up the app. Is called when user clicks on the delivery button.
-    """
-
-    app_instance.engine.show_dialog(
-        "Deliveries", app_instance, DeliveryController
-    )
+    """Opens up the app. Is called when user clicks on the delivery button."""
+    app_instance.engine.show_dialog("Deliveries", app_instance, DeliveryController)
 
 
 class DeliveryController(QtWidgets.QWidget):
-    """
-    The controller for the delivery application.
-    """
+    """The controller for the delivery application."""
 
     def __init__(self):
-        """
-        Initializes the controller.
-        """
         self.view = view.DeliveryView()
         self.view.create_user_interface(self)
-        self.model = model.DeliveryModel(
-            sgtk.platform.current_bundle(), logger
-        )
-        self.connect_buttons()
+        self.model = model.DeliveryModel(sgtk.platform.current_bundle(), logger)
+        self.shots_by_id = {}
+        self.load_thread = None
+        self.export_thread = None
+        self.connect_signals()
         self.load_shots()
 
-    def connect_buttons(self):
-        """Connects the buttons from our view to our controller function."""
-        self.view.reload_button.clicked.connect(self.load_shots)
-        self.view.export_shots_button.clicked.connect(self.export_shots)
-        self.view.open_delivery_folder_button.clicked.connect(
-            self.open_delivery_folder
-        )
+    def connect_signals(self):
+        v = self.view
+        v.reload_button.clicked.connect(self.load_shots)
+        v.export_shots_button.clicked.connect(self.export_shots)
+        v.open_delivery_folder_button.clicked.connect(self.model.open_delivery_folder)
+        v.select_all_button.clicked.connect(lambda: v.set_all_checked(True))
+        v.select_none_button.clicked.connect(lambda: v.set_all_checked(False))
+        v.expand_button.clicked.connect(v.tree.expandAll)
+        v.collapse_button.clicked.connect(v.tree.collapseAll)
+        v.filter_field.textChanged.connect(v.apply_filter)
+        v.tree.itemChanged.connect(lambda *_: self.update_selection_label())
 
+    # --------------------------------------------------------------- loading
     def load_shots(self):
-        """Clear the olds shots, then fetches the shots on the model."""
-        self.view.final_validation_label.hide()
-
-        for shot in self.view.shot_widget_references:
-            self.view.shot_widget_references[shot]["widget"].hide()
-            self.view.shots_list_widget_layout.removeWidget(
-                self.view.shot_widget_references[shot]["widget"]
-            )
-
+        if self.export_thread and self.export_thread.isRunning():
+            return
+        self.view.clear_shots()
+        self.view.status_label.setText("")
         self.view.loading_widget.show()
-        self.model.load_shots(
-            self.loading_shots_successful,
-            self.loading_shots_failed,
-        )
+        self.view.set_busy(True)
 
-    def loading_shots_successful(self, shots_to_deliver):
-        """Runs when shots have finished loading.
+        self.load_thread = model.LoadShotsThread(self.model)
+        self.load_thread.loading_shots_successful.connect(self.loading_shots_successful)
+        self.load_thread.loading_shots_failed.connect(self.loading_shots_failed)
+        self.load_thread.start()
 
-        Args:
-            shots_to_deliver: List of shots to deliver
-        """
+    def loading_shots_successful(self, shots):
         self.view.loading_widget.hide()
-
-        for shot in shots_to_deliver:
-            shot_widget = self.view.get_shot_widget(shot)
-            self.view.shots_list_widget_layout.addWidget(shot_widget)
+        self.view.set_busy(False)
+        self.shots_by_id = {shot["id"]: shot for shot in shots}
+        self.view.populate_shots(shots)
+        self.view.apply_filter(self.view.filter_field.text())
+        self.update_selection_label()
 
     def loading_shots_failed(self, error: str):
-        """Runs when loading shots fails.
-
-        Args:
-            error: Error message from model
-        """
         logger.error(f"Error while loading shots: {error}")
         self.view.loading_widget.hide()
-        self.view.shots_list_widget_layout.addWidget(
-            QtWidgets.QLabel("Error while loading shots. Please check logs!")
-        )
+        self.view.set_busy(False)
+        self.view.status_label.setText(f"Error while loading shots: {error}")
 
-    def open_delivery_folder(self):
-        """Opens the delivery folder."""
-        self.model.open_delivery_folder()
+    def update_selection_label(self):
+        if self.export_thread and self.export_thread.isRunning():
+            return
+        count = len(self.view.checked_shot_ids())
+        total = len(self.shots_by_id)
+        self.view.status_label.setText(f"{count} of {total} shots selected")
 
+    # -------------------------------------------------------------- delivery
     def export_shots(self):
-        """Runs the export function on the model."""
-        self.view.final_validation_label.hide()
-        self.model.export_shots(
-            self.show_validation_error,
-            self.update_progress_bar,
-            self.show_validation_message,
+        shot_ids = self.view.checked_shot_ids()
+        if not shot_ids:
+            QtWidgets.QMessageBox.information(
+                self, "Deliveries", "No shots selected. Tick the shots you want to deliver."
+            )
+            return
+
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Deliveries",
+            f"Deliver the latest version of {len(shot_ids)} shot(s)?",
         )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
 
-    def show_validation_error(self, shot: dict) -> None:
-        """Sets the validation error text on the shot widget.
+        # Keep tree order (sequence / shot).
+        shots = [self.shots_by_id[i] for i in self.shots_by_id if i in set(shot_ids)]
 
-        Args:
-            shot: Shot information to show validation error on
-        """
-        self.view.shot_widget_references[shot["id"]][
-            "validation_label"
-        ].setText(shot["validation_error"])
-        self.view.shot_widget_references[shot["id"]][
-            "validation_label"
-        ].setStyleSheet("color: '#FF3E3E'; font: bold; font-size: 12px")
-        self.view.final_validation_label.show()
+        self.view.reset_results(shot_ids)
+        self.view.set_busy(True)
+        self.view.status_label.setText(f"Delivering {len(shots)} shot(s)...")
 
-    def show_validation_message(self, shot) -> None:
-        """Sets the validation message on the shot widget.
+        self.export_thread = model.ExportShotsThread(self.model, shots)
+        self.export_thread.shot_message.connect(
+            lambda shot_id, msg: self.view.set_shot_message(shot_id, msg)
+        )
+        self.export_thread.shot_error.connect(
+            lambda shot_id, msg: self.view.set_shot_message(shot_id, msg, error=True)
+        )
+        self.export_thread.shot_progress.connect(self.view.set_shot_progress)
+        self.export_thread.export_finished.connect(self.export_finished)
+        self.export_thread.start()
 
-        Args:
-            shot: Shot to show validation message on
-        """
-        self.view.shot_widget_references[shot["id"]][
-            "validation_label"
-        ].setText(shot["validation_message"])
-        self.view.shot_widget_references[shot["id"]][
-            "validation_label"
-        ].setStyleSheet("color: '#8BFF3E'; font: normal; font-size: 10px")
-
-    def update_progress_bar(self, shot: dict) -> None:
-        """Updates the progress bar on a shot.
-
-        Args:
-            shot: Shot to change progress bar on
-        """
-        self.view.shot_widget_references[shot["id"]][
-            "shot_progress_bar"
-        ].setValue(shot["frames_delivered"])
+    def export_finished(self, delivered: int, failed: int):
+        self.view.set_busy(False)
+        text = f"Delivered {delivered} shot(s)."
+        if failed:
+            text += f" {failed} shot(s) failed, see the Result column."
+        self.view.status_label.setText(text)

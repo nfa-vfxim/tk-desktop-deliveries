@@ -41,6 +41,10 @@ class ValidationError(Exception):
     """Gets raised when validation fails."""
 
 
+class AlreadyDelivered(Exception):
+    """Gets raised when this version is already in the delivery folder."""
+
+
 def _natural_key(text: str) -> list:
     """Sort key that orders 'sh010' < 'sh020' < 'sh100' and '2' < '10'."""
     return [
@@ -230,10 +234,13 @@ class DeliveryModel:
                 shot["sequence_path"] = _local_path(exr)
                 shot["version_number"] = exr["version_number"]
                 shot["note"] = (
-                    f"Latest version has no EXRs; using EXR publish v{exr['version_number']:03d}."
+                    f"Latest version has no EXRs; delivered older EXR publish "
+                    f"v{exr['version_number']:03d}."
                 )
             elif version_publishes:
-                shot["blocked"] = "Only a reference MOV is published, no EXR sequence."
+                shot["blocked"] = (
+                    "Only a reference MOV is published and no older EXR publish exists."
+                )
             else:
                 shot["load_error"] = "Latest version has no published files."
 
@@ -290,8 +297,6 @@ class DeliveryModel:
         shot["frames_on_disk"] = frames
 
         warnings = []
-        if shot["note"]:
-            warnings.append(shot["note"])
 
         first, last = shot["first_frame"], shot["last_frame"]
         disk_range = f"{frames[0]}-{frames[-1]}"
@@ -332,17 +337,22 @@ class DeliveryModel:
         source = Path(shot["sequence_path"])
         source_pattern = re.compile(r"%0?(\d*)d|#+")
         frames = shot["frames_on_disk"]
-        for index, frame in enumerate(frames, 1):
-            publish_file = source.with_name(
-                source_pattern.sub(lambda m: _format_frame(m, frame), source.name, count=1)
+        pairs = [
+            (
+                source.with_name(
+                    source_pattern.sub(lambda m, f=frame: _format_frame(m, f), source.name, count=1)
+                ),
+                delivery_path.with_name(delivery_path.name % frame),
             )
-            delivery_file = delivery_path.with_name(delivery_path.name % frame)
-            try:
-                os.link(publish_file, delivery_file)
-            except FileExistsError as error:
-                raise ValidationError(
-                    "Files already exist. Has this version been delivered before?"
-                ) from error
+            for frame in frames
+        ]
+
+        # Leave an existing delivery of this version alone.
+        if any(target.exists() for _, target in pairs):
+            raise AlreadyDelivered()
+
+        for index, (publish_file, delivery_file) in enumerate(pairs, 1):
+            os.link(publish_file, delivery_file)
             progress_callback(shot["id"], index, len(frames))
 
         self.logger.info(f"Delivered {shot['sequence']} {shot['shot']} to {delivery_path.parent}.")
@@ -460,13 +470,22 @@ class ExportShotsThread(QtCore.QThread):
                 self.shot_message.emit(shot["id"], "Delivering...")
                 self.model.deliver_shot(shot, self.shot_progress.emit)
                 delivered += 1
-                if warnings:
+                if shot["note"]:
+                    # Delivered, but not the latest version: red so it stands out.
+                    warned += 1
+                    text = " ".join([shot["note"]] + warnings)
+                    self.model.logger.warning(f"{label}: {text}")
+                    self.shot_error.emit(shot["id"], text)
+                elif warnings:
                     warned += 1
                     text = "Delivered, but: " + " ".join(warnings)
                     self.model.logger.warning(f"{label}: {text}")
                     self.shot_warning.emit(shot["id"], text)
                 else:
                     self.shot_message.emit(shot["id"], "Delivered!")
+            except AlreadyDelivered:
+                self.model.logger.info(f"{label}: already delivered, skipped.")
+                self.shot_message.emit(shot["id"], "Already delivered.")
             except ValidationError as error:
                 self.model.logger.error(f"{label}: {error}")
                 self.shot_error.emit(shot["id"], str(error))

@@ -38,6 +38,8 @@ COLOR_MUTED = "#888888"
 COL_SHOT, COL_STATUS, COL_VERSION, COL_FRAMES, COL_RESULT = range(5)
 NUM_COLUMNS = 5
 
+THUMB_W, THUMB_H = 96, 54
+
 
 class DeliveryView:
     """All Qt UI for the ShotGrid delivery application."""
@@ -46,6 +48,9 @@ class DeliveryView:
         # shot id -> {"item": QTreeWidgetItem}
         self.shot_items = {}
         self.sequence_items = []
+        self.thumbnails = {}  # shot id -> QIcon
+        self.show_thumbnails = True
+        self._placeholder = None
 
     def create_user_interface(self, main_widget: QtWidgets.QWidget):
         QtWidgets.QWidget.__init__(main_widget)
@@ -78,6 +83,10 @@ class DeliveryView:
         self.filter_field.setClearButtonEnabled(True)
         layout.addWidget(self.filter_field, 1)
 
+        self.thumbnails_checkbox = QtWidgets.QCheckBox("Thumbnails")
+        self.thumbnails_checkbox.setChecked(True)
+        layout.addWidget(self.thumbnails_checkbox)
+
         self.select_all_button = QtWidgets.QPushButton("Select all")
         self.select_none_button = QtWidgets.QPushButton("Select none")
         self.expand_button = QtWidgets.QPushButton("Expand all")
@@ -97,11 +106,11 @@ class DeliveryView:
             ["Shot", "Status", "Version", "Frames", "Result"]
         )
         self.tree.setAlternatingRowColors(True)
-        self.tree.setUniformRowHeights(True)
         header = self.tree.header()
         header.setStretchLastSection(True)
-        self.tree.setColumnWidth(COL_SHOT, 200)
-        self.tree.setColumnWidth(COL_STATUS, 70)
+        self.tree.setIconSize(QtCore.QSize(THUMB_W, THUMB_H))
+        self.tree.setColumnWidth(COL_SHOT, 260)
+        self.tree.setColumnWidth(COL_STATUS, 140)
         self.tree.setColumnWidth(COL_VERSION, 70)
         self.tree.setColumnWidth(COL_FRAMES, 110)
         return self.tree
@@ -143,6 +152,7 @@ class DeliveryView:
         self.tree.clear()
         self.shot_items = {}
         self.sequence_items = []
+        self.thumbnails = {}
 
     def populate_shots(self, shots: list[dict]) -> None:
         """Fills the tree. Shots must already be sorted by sequence."""
@@ -178,7 +188,7 @@ class DeliveryView:
         )
         version = f"v{shot['version_number']:03d}" if shot["version_number"] else "-"
         item = QtWidgets.QTreeWidgetItem(
-            parent, [shot["shot"], shot["status"] or "", version, frames, ""]
+            parent, [shot["shot"], shot["status_name"], version, frames, ""]
         )
         item.setData(COL_SHOT, QtCore.Qt.UserRole, shot["id"])
 
@@ -197,7 +207,49 @@ class DeliveryView:
             if shot["version_name"]:
                 item.setToolTip(COL_VERSION, shot["version_name"])
 
+        if shot["status"]:
+            item.setToolTip(COL_STATUS, shot["status"])
         self.shot_items[shot["id"]] = {"item": item, "shot": shot}
+        if self.show_thumbnails:
+            item.setIcon(COL_SHOT, self.placeholder_icon())
+
+    # ----------------------------------------------------------- thumbnails
+    def placeholder_icon(self):
+        if self._placeholder is None:
+            pixmap = QtGui.QPixmap(THUMB_W, THUMB_H)
+            pixmap.fill(QtGui.QColor("#3a3a3a"))
+            self._placeholder = QtGui.QIcon(pixmap)
+        return self._placeholder
+
+    def set_thumbnail(self, shot_id: int, path: str) -> None:
+        """Shows a downloaded thumbnail, letterboxed to a fixed 96x54."""
+        refs = self.shot_items.get(shot_id)
+        source = QtGui.QPixmap(path)
+        if not refs or source.isNull():
+            return
+        scaled = source.scaled(
+            THUMB_W, THUMB_H, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+        )
+        canvas = QtGui.QPixmap(THUMB_W, THUMB_H)
+        canvas.fill(QtGui.QColor("#1a1a1a"))
+        painter = QtGui.QPainter(canvas)
+        painter.drawPixmap(
+            (THUMB_W - scaled.width()) // 2, (THUMB_H - scaled.height()) // 2, scaled
+        )
+        painter.end()
+        icon = QtGui.QIcon(canvas)
+        self.thumbnails[shot_id] = icon
+        if self.show_thumbnails:
+            refs["item"].setIcon(COL_SHOT, icon)
+
+    def set_thumbnails_visible(self, visible: bool) -> None:
+        self.show_thumbnails = visible
+        self.tree.setIconSize(
+            QtCore.QSize(THUMB_W, THUMB_H) if visible else QtCore.QSize(16, 16)
+        )
+        for shot_id, refs in self.shot_items.items():
+            icon = self.thumbnails.get(shot_id, self.placeholder_icon())
+            refs["item"].setIcon(COL_SHOT, icon if visible else QtGui.QIcon())
 
     # ---------------------------------------------------------------- state
     def checked_shot_ids(self) -> list[int]:

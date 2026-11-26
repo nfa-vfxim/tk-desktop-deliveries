@@ -39,7 +39,8 @@ configuration:
     type: str
     default_value: "rfd"
     description: >
-      Shots with this status are ticked by default when the app opens.
+      Shots with this status code are ticked by default when the app opens.
+      Shots whose status is named "Ready for Delivery" are always ticked too.
       All shots are always listed and can be (de)selected regardless of status.
       Set to an empty string to start with nothing selected.
 

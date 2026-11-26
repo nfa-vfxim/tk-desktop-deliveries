@@ -49,6 +49,7 @@ class DeliveryController(QtWidgets.QWidget):
         self.shots_by_id = {}
         self.load_thread = None
         self.export_thread = None
+        self.thumbnail_thread = None
         self.connect_signals()
         self.load_shots()
         QtCore.QTimer.singleShot(0, self.bring_to_front)
@@ -81,12 +82,14 @@ class DeliveryController(QtWidgets.QWidget):
         v.expand_button.clicked.connect(v.tree.expandAll)
         v.collapse_button.clicked.connect(v.tree.collapseAll)
         v.filter_field.textChanged.connect(v.apply_filter)
+        v.thumbnails_checkbox.toggled.connect(v.set_thumbnails_visible)
         v.tree.itemChanged.connect(lambda *_: self.update_selection_label())
 
     # --------------------------------------------------------------- loading
     def load_shots(self):
         if self.export_thread and self.export_thread.isRunning():
             return
+        self.stop_thumbnails()
         self.view.clear_shots()
         self.view.status_label.setText("")
         self.view.loading_widget.show()
@@ -106,6 +109,24 @@ class DeliveryController(QtWidgets.QWidget):
         self.view.populate_shots(shots)
         self.view.apply_filter(self.view.filter_field.text())
         self.update_selection_label()
+        self.load_thumbnails(shots)
+
+    def load_thumbnails(self, shots):
+        """Downloads thumbnails in the background after the list is shown."""
+        self.thumbnail_thread = model.ThumbnailThread(self.model, shots)
+        self.thumbnail_thread.thumbnail_ready.connect(self.view.set_thumbnail)
+        self.thumbnail_thread.start()
+
+    def stop_thumbnails(self):
+        if self.thumbnail_thread and self.thumbnail_thread.isRunning():
+            self.thumbnail_thread.thumbnail_ready.disconnect()
+            self.thumbnail_thread.stop()
+            self.thumbnail_thread.wait(2000)
+        self.thumbnail_thread = None
+
+    def closeEvent(self, event):
+        self.stop_thumbnails()
+        super().closeEvent(event)
 
     def loading_shots_failed(self, error: str):
         logger.error(f"Error while loading shots: {error}")

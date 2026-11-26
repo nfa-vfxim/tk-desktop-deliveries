@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from pathlib import Path
 
 from .qt_compat import QtCore
@@ -85,6 +86,15 @@ class DeliveryModel:
         )
         return project["sg_projectcode"]
 
+    def get_status_names(self) -> dict:
+        """Maps status codes (e.g. 'rfd') to their full names."""
+        try:
+            statuses = self.shotgrid_connection.find("Status", [], ["code", "name"])
+        except Exception:
+            self.logger.exception("Could not load status names.")
+            return {}
+        return {status["code"]: status["name"] for status in statuses}
+
     # --------------------------------------------------------------- loading
     def get_all_shots(self) -> list[dict]:
         """Gets every shot in the project with its latest version info.
@@ -105,7 +115,7 @@ class DeliveryModel:
         sg_shots = self.shotgrid_connection.find(
             "Shot",
             [project_filter],
-            ["code", "sg_sequence", "sg_status_list"],
+            ["code", "sg_sequence", "sg_status_list", "image"],
         )
         if not sg_shots:
             self.shots = []
@@ -121,7 +131,7 @@ class DeliveryModel:
                 project_filter,
                 ["entity", "in", [{"type": "Shot", "id": i} for i in shot_ids]],
             ],
-            ["entity", "published_files", "sg_first_frame", "sg_last_frame", "code"],
+            ["entity", "published_files", "sg_first_frame", "sg_last_frame", "code", "image"],
             [{"field_name": "created_at", "direction": "desc"}],
         )
         latest_versions = {}
@@ -146,6 +156,7 @@ class DeliveryModel:
                 publishes[publish["id"]] = publish
 
         preselect_status = self._app.get_setting("preselect_status") or ""
+        status_names = self.get_status_names()
 
         shots = []
         for sg_shot in sg_shots:
@@ -155,6 +166,11 @@ class DeliveryModel:
                 "sequence": sequence,
                 "shot": sg_shot["code"],
                 "status": sg_shot.get("sg_status_list"),
+                "status_name": status_names.get(
+                    sg_shot.get("sg_status_list"), sg_shot.get("sg_status_list") or ""
+                ),
+                "thumbnail_url": sg_shot.get("image"),
+                "thumbnail_key": f"shot_{sg_shot['id']}",
                 "project_code": project_code,
                 "first_frame": None,
                 "last_frame": None,
@@ -163,8 +179,11 @@ class DeliveryModel:
                 "version_name": None,
                 "load_error": None,
             }
+            # Pre-tick shots that are ready for delivery: either the configured
+            # status code, or any status whose name is "Ready for Delivery".
             shot["preselected"] = bool(
-                preselect_status and shot["status"] == preselect_status
+                (preselect_status and shot["status"] == preselect_status)
+                or shot["status_name"].strip().lower() == "ready for delivery"
             )
 
             version = latest_versions.get(sg_shot["id"])
@@ -185,6 +204,10 @@ class DeliveryModel:
                     shot["version_name"] = version.get("code")
                     shot["first_frame"] = version.get("sg_first_frame")
                     shot["last_frame"] = version.get("sg_last_frame")
+                    if version.get("image"):
+                        # Thumbnail of the version that gets delivered.
+                        shot["thumbnail_url"] = version["image"]
+                        shot["thumbnail_key"] = f"version_{version['id']}"
 
             shots.append(shot)
 
@@ -272,6 +295,49 @@ class DeliveryModel:
             self.shotgrid_connection.update(
                 "Shot", shot["id"], {"sg_status_list": delivered_status}
             )
+
+
+THUMBNAIL_CACHE = Path(tempfile.gettempdir()) / "nfa_deliveries_thumbnails"
+
+
+class ThumbnailThread(QtCore.QThread):
+    """Downloads shot thumbnails in the background, one by one.
+
+    Thumbnails are cached per version, so reopening the app is fast.
+    """
+
+    thumbnail_ready = QtCore.Signal(int, str)  # shot id, local file path
+
+    def __init__(self, model, shots: list[dict]):
+        super().__init__()
+        self.model = model
+        self.shots = shots
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
+
+    def run(self):
+        import sgtk
+
+        THUMBNAIL_CACHE.mkdir(parents=True, exist_ok=True)
+        for shot in self.shots:
+            if self._stopped:
+                return
+            url = shot.get("thumbnail_url")
+            if not url:
+                continue
+            path = THUMBNAIL_CACHE / f"{shot['thumbnail_key']}.jpg"
+            try:
+                if not path.is_file() or path.stat().st_size == 0:
+                    sgtk.util.download_url(
+                        self.model.shotgrid_connection, url, str(path)
+                    )
+                self.thumbnail_ready.emit(shot["id"], str(path))
+            except Exception as error:
+                self.model.logger.warning(
+                    f"Could not download thumbnail for {shot['shot']}: {error}"
+                )
 
 
 class LoadShotsThread(QtCore.QThread):

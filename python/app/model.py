@@ -99,8 +99,8 @@ class DeliveryModel:
     def get_all_shots(self) -> list[dict]:
         """Gets every shot in the project with its latest version info.
 
-        Uses three batched ShotGrid queries (shots, versions, published files)
-        instead of a query per shot, so large projects still load quickly.
+        Uses a few batched ShotGrid queries instead of a query per shot, so
+        large projects still load quickly.
 
         Returns:
             List of shot information dicts, sorted by sequence and shot.
@@ -112,39 +112,43 @@ class DeliveryModel:
             {"type": "Project", "id": self.context.project["id"]},
         ]
 
-        sg_shots = self.shotgrid_connection.find(
-            "Shot",
-            [project_filter],
-            ["code", "sg_sequence", "sg_status_list", "image"],
-        )
+        status_names = self.get_status_names()
+        hidden_statuses = set(self._app.get_setting("hidden_statuses") or [])
+
+        sg_shots = [
+            shot
+            for shot in self.shotgrid_connection.find(
+                "Shot",
+                [project_filter],
+                ["code", "sg_sequence", "sg_status_list", "image"],
+            )
+            if shot.get("sg_status_list") not in hidden_statuses
+            and status_names.get(shot.get("sg_status_list"), "").strip().lower() != "omit"
+        ]
         if not sg_shots:
             self.shots = []
             return self.shots
 
         project_code = self.get_project_code()
-        shot_ids = [shot["id"] for shot in sg_shots]
+        shot_entities = [{"type": "Shot", "id": shot["id"]} for shot in sg_shots]
 
         # Latest version per shot (one query, newest first).
         versions = self.shotgrid_connection.find(
             "Version",
-            [
-                project_filter,
-                ["entity", "in", [{"type": "Shot", "id": i} for i in shot_ids]],
-            ],
+            [project_filter, ["entity", "in", shot_entities]],
             ["entity", "published_files", "sg_first_frame", "sg_last_frame", "code", "image"],
             [{"field_name": "created_at", "direction": "desc"}],
         )
         latest_versions = {}
         for version in versions:
-            shot_id = version["entity"]["id"]
-            if shot_id not in latest_versions:
-                latest_versions[shot_id] = version
+            latest_versions.setdefault(version["entity"]["id"], version)
 
-        # First published file of each latest version (one query).
+        # ALL published files of each latest version (one query). A version
+        # often has both a review MOV and the EXR sequence linked.
         publish_ids = [
-            version["published_files"][0]["id"]
+            publish["id"]
             for version in latest_versions.values()
-            if version["published_files"]
+            for publish in version["published_files"] or []
         ]
         publishes = {}
         if publish_ids:
@@ -155,20 +159,31 @@ class DeliveryModel:
             ):
                 publishes[publish["id"]] = publish
 
+        # Fallback: newest EXR publish on the shot itself, for shots whose
+        # latest version only links a MOV (one query).
+        fallback_exrs = {}
+        for publish in self.shotgrid_connection.find(
+            "PublishedFile",
+            [project_filter, ["entity", "in", shot_entities], ["path_cache", "contains", ".exr"]],
+            ["entity", "path", "version_number", "version"],
+            [{"field_name": "version_number", "direction": "desc"},
+             {"field_name": "created_at", "direction": "desc"}],
+        ):
+            if publish.get("entity") and _local_path(publish):
+                fallback_exrs.setdefault(publish["entity"]["id"], publish)
+
         preselect_status = self._app.get_setting("preselect_status") or ""
-        status_names = self.get_status_names()
 
         shots = []
         for sg_shot in sg_shots:
             sequence = (sg_shot.get("sg_sequence") or {}).get("name") or "No sequence"
+            status = sg_shot.get("sg_status_list")
             shot = {
                 "id": sg_shot["id"],
                 "sequence": sequence,
                 "shot": sg_shot["code"],
-                "status": sg_shot.get("sg_status_list"),
-                "status_name": status_names.get(
-                    sg_shot.get("sg_status_list"), sg_shot.get("sg_status_list") or ""
-                ),
+                "status": status,
+                "status_name": status_names.get(status, status or ""),
                 "thumbnail_url": sg_shot.get("image"),
                 "thumbnail_key": f"shot_{sg_shot['id']}",
                 "project_code": project_code,
@@ -177,37 +192,50 @@ class DeliveryModel:
                 "sequence_path": None,
                 "version_number": None,
                 "version_name": None,
-                "load_error": None,
+                "load_error": None,  # shot is hidden from the list
+                "blocked": None,  # shot is listed but can't be ticked
+                "note": None,  # yellow info shown in the Result column
             }
-            # Pre-tick shots that are ready for delivery: either the configured
-            # status code, or any status whose name is "Ready for Delivery".
             shot["preselected"] = bool(
-                (preselect_status and shot["status"] == preselect_status)
+                (preselect_status and status == preselect_status)
                 or shot["status_name"].strip().lower() == "ready for delivery"
             )
 
             version = latest_versions.get(sg_shot["id"])
             if not version:
                 shot["load_error"] = "No versions found for this shot."
-            elif not version["published_files"]:
-                shot["load_error"] = (
-                    "Latest version has no published files (e.g. a playblast)."
+                shots.append(shot)
+                continue
+
+            shot["version_name"] = version.get("code")
+            shot["first_frame"] = version.get("sg_first_frame")
+            shot["last_frame"] = version.get("sg_last_frame")
+            if version.get("image"):
+                # Thumbnail of the version that gets delivered.
+                shot["thumbnail_url"] = version["image"]
+                shot["thumbnail_key"] = f"version_{version['id']}"
+
+            version_publishes = [
+                publishes[p["id"]]
+                for p in version["published_files"] or []
+                if p["id"] in publishes and _local_path(publishes[p["id"]])
+            ]
+            exr = next((p for p in version_publishes if _is_exr(p)), None)
+
+            if exr:
+                shot["sequence_path"] = _local_path(exr)
+                shot["version_number"] = exr["version_number"]
+            elif shot["id"] in fallback_exrs:
+                exr = fallback_exrs[shot["id"]]
+                shot["sequence_path"] = _local_path(exr)
+                shot["version_number"] = exr["version_number"]
+                shot["note"] = (
+                    f"Latest version has no EXRs; using EXR publish v{exr['version_number']:03d}."
                 )
+            elif version_publishes:
+                shot["blocked"] = "Only a reference MOV is published, no EXR sequence."
             else:
-                publish = publishes.get(version["published_files"][0]["id"])
-                path = (publish or {}).get("path") or {}
-                if not path.get("local_path_windows"):
-                    shot["load_error"] = "Published file has no local path."
-                else:
-                    shot["sequence_path"] = path["local_path_windows"]
-                    shot["version_number"] = publish["version_number"]
-                    shot["version_name"] = version.get("code")
-                    shot["first_frame"] = version.get("sg_first_frame")
-                    shot["last_frame"] = version.get("sg_last_frame")
-                    if version.get("image"):
-                        # Thumbnail of the version that gets delivered.
-                        shot["thumbnail_url"] = version["image"]
-                        shot["thumbnail_key"] = f"version_{version['id']}"
+                shot["load_error"] = "Latest version has no published files."
 
             shots.append(shot)
 
@@ -217,50 +245,75 @@ class DeliveryModel:
         return shots
 
     # ------------------------------------------------------------ validation
-    def validate_shot(self, shot: dict) -> None:
-        """Runs all validation checks on a shot.
+    def find_frames_on_disk(self, sequence_path: str) -> list[int]:
+        """Returns the sorted frame numbers that exist for a sequence path.
+
+        Supports %04d, %d and #### frame patterns.
+        """
+        folder = Path(sequence_path).parent
+        name = Path(sequence_path).name
+        match = re.search(r"%0?(\d*)d|#+", name)
+        if not match:
+            raise ValidationError("Published path is not a frame sequence.")
+        prefix, suffix = name[: match.start()], name[match.end() :]
+        pattern = re.compile(
+            "^" + re.escape(prefix) + r"(-?\d+)" + re.escape(suffix) + "$", re.IGNORECASE
+        )
+        if not folder.is_dir():
+            raise ValidationError(f"Publish folder doesn't exist: {folder}")
+        frames = []
+        for entry in os.scandir(folder):
+            found = pattern.match(entry.name)
+            if found and entry.is_file():
+                frames.append(int(found.group(1)))
+        return sorted(frames)
+
+    def validate_shot(self, shot: dict) -> list[str]:
+        """Checks the shot and decides which frames to deliver.
+
+        Returns:
+            Warnings (yellow) for things that don't stop the delivery.
 
         Raises:
             ValidationError: When the shot can't be delivered.
         """
-        if shot["load_error"]:
-            raise ValidationError(shot["load_error"])
-        self.validate_filetype(shot)
-        self.validate_all_frames_exist(shot)
+        if shot["load_error"] or shot["blocked"]:
+            raise ValidationError(shot["load_error"] or shot["blocked"])
+        if not _is_exr({"path": {"local_path_windows": shot["sequence_path"]}}):
+            raise ValidationError("Linked file is not an EXR sequence.")
 
-    def validate_all_frames_exist(self, shot: dict) -> None:
-        """Checks if all frames in the shot sequence exist."""
-        if shot["first_frame"] is None or shot["last_frame"] is None:
+        frames = self.find_frames_on_disk(shot["sequence_path"])
+        if not frames:
             raise ValidationError(
-                "Shot version is missing frame range data. Was it published correctly?"
+                f"No EXR frames found on disk in {Path(shot['sequence_path']).parent}"
             )
+        shot["frames_on_disk"] = frames
 
-        for frame in range(shot["first_frame"], shot["last_frame"] + 1):
-            try:
-                frame_file_path = Path(shot["sequence_path"] % frame)
-            except TypeError as error:
-                raise ValidationError(
-                    "Could not format filepath. Are the EXRs correctly linked to this shot version?"
-                ) from error
+        warnings = []
+        if shot["note"]:
+            warnings.append(shot["note"])
 
-            if not frame_file_path.is_file():
-                self.logger.error(f"Could not find file at {frame_file_path}.")
-                raise ValidationError(f"Can't find frame {frame}. Does it exist on disk?")
-
-    def validate_filetype(self, shot: dict) -> None:
-        """Checks that the linked file is not a reference MOV."""
-        if shot["sequence_path"].lower().endswith(".mov"):
-            raise ValidationError(
-                "Linked version file is a reference MOV, not an EXR sequence."
-            )
+        first, last = shot["first_frame"], shot["last_frame"]
+        disk_range = f"{frames[0]}-{frames[-1]}"
+        if first is None or last is None:
+            warnings.append(f"No frame range on version; delivered {disk_range}.")
+        else:
+            expected = set(range(first, last + 1))
+            missing = len(expected - set(frames))
+            if frames[0] != first or frames[-1] != last or missing:
+                text = f"Frame range doesn't match: expected {first}-{last}, on disk {disk_range}"
+                if missing:
+                    text += f", {missing} missing"
+                warnings.append(text + ".")
+        return warnings
 
     # -------------------------------------------------------------- delivery
     def deliver_shot(self, shot: dict, progress_callback) -> None:
-        """Hard-links the shot frames to the delivery folder.
+        """Hard-links the frames found on disk to the delivery folder.
 
         Args:
-            shot: Shot information dict
-            progress_callback: Called with (shot_id, frame) after every frame.
+            shot: Shot information dict (validated, so it has frames_on_disk)
+            progress_callback: Called with (shot_id, done, total) after every frame.
 
         Raises:
             ValidationError: When files already exist.
@@ -276,8 +329,13 @@ class DeliveryModel:
         delivery_path = Path(delivery_template.apply_fields(template_fields))
         delivery_path.parent.mkdir(parents=True, exist_ok=True)
 
-        for frame in range(shot["first_frame"], shot["last_frame"] + 1):
-            publish_file = Path(shot["sequence_path"] % frame)
+        source = Path(shot["sequence_path"])
+        source_pattern = re.compile(r"%0?(\d*)d|#+")
+        frames = shot["frames_on_disk"]
+        for index, frame in enumerate(frames, 1):
+            publish_file = source.with_name(
+                source_pattern.sub(lambda m: _format_frame(m, frame), source.name, count=1)
+            )
             delivery_file = delivery_path.with_name(delivery_path.name % frame)
             try:
                 os.link(publish_file, delivery_file)
@@ -285,7 +343,7 @@ class DeliveryModel:
                 raise ValidationError(
                     "Files already exist. Has this version been delivered before?"
                 ) from error
-            progress_callback(shot["id"], frame)
+            progress_callback(shot["id"], index, len(frames))
 
         self.logger.info(f"Delivered {shot['sequence']} {shot['shot']} to {delivery_path.parent}.")
 
@@ -295,6 +353,24 @@ class DeliveryModel:
             self.shotgrid_connection.update(
                 "Shot", shot["id"], {"sg_status_list": delivered_status}
             )
+
+
+def _local_path(publish: dict) -> str:
+    return ((publish or {}).get("path") or {}).get("local_path_windows") or ""
+
+
+def _is_exr(publish: dict) -> bool:
+    return _local_path(publish).lower().endswith(".exr")
+
+
+def _format_frame(match, frame: int) -> str:
+    """Formats a frame number like the %04d / #### token it replaces."""
+    token = match.group(0)
+    if token.startswith("#"):
+        padding = len(token)
+    else:
+        padding = int(match.group(1) or 0)
+    return str(frame).zfill(padding)
 
 
 THUMBNAIL_CACHE = Path(tempfile.gettempdir()) / "nfa_deliveries_thumbnails"
@@ -365,9 +441,10 @@ class ExportShotsThread(QtCore.QThread):
     """
 
     shot_message = QtCore.Signal(int, str)  # shot id, message
+    shot_warning = QtCore.Signal(int, str)  # shot id, warning (delivered anyway)
     shot_error = QtCore.Signal(int, str)  # shot id, error
-    shot_progress = QtCore.Signal(int, int)  # shot id, frame
-    export_finished = QtCore.Signal(int, int)  # delivered, failed
+    shot_progress = QtCore.Signal(int, int, int)  # shot id, done, total
+    export_finished = QtCore.Signal(int, int, int)  # delivered, with warnings, failed
 
     def __init__(self, model, shots: list[dict]):
         super().__init__()
@@ -375,15 +452,21 @@ class ExportShotsThread(QtCore.QThread):
         self.shots = shots
 
     def run(self):
-        delivered, failed = 0, 0
+        delivered, warned, failed = 0, 0, 0
         for shot in self.shots:
             label = f"{shot['sequence']} {shot['shot']}"
             try:
-                self.model.validate_shot(shot)
-                self.shot_message.emit(shot["id"], "Validation passed, delivering...")
+                warnings = self.model.validate_shot(shot)
+                self.shot_message.emit(shot["id"], "Delivering...")
                 self.model.deliver_shot(shot, self.shot_progress.emit)
-                self.shot_message.emit(shot["id"], "Delivered!")
                 delivered += 1
+                if warnings:
+                    warned += 1
+                    text = "Delivered, but: " + " ".join(warnings)
+                    self.model.logger.warning(f"{label}: {text}")
+                    self.shot_warning.emit(shot["id"], text)
+                else:
+                    self.shot_message.emit(shot["id"], "Delivered!")
             except ValidationError as error:
                 self.model.logger.error(f"{label}: {error}")
                 self.shot_error.emit(shot["id"], str(error))
@@ -394,4 +477,4 @@ class ExportShotsThread(QtCore.QThread):
                     shot["id"], f"Unexpected error: {error}. Check the logs."
                 )
                 failed += 1
-        self.export_finished.emit(delivered, failed)
+        self.export_finished.emit(delivered, warned, failed)

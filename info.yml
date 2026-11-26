@@ -44,6 +44,15 @@ configuration:
       All shots are always listed and can be (de)selected regardless of status.
       Set to an empty string to start with nothing selected.
 
+  hidden_statuses:
+    type: list
+    values:
+      type: str
+    default_value: ["omt"]
+    description: >
+      Shots with one of these status codes are not listed at all.
+      Shots whose status is named "Omit" are always hidden too.
+
   set_delivered_status:
     type: bool
     default_value: false

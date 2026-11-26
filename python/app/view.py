@@ -33,6 +33,7 @@ SCRIPT_LOCATION: Path = Path(__file__).parent
 
 COLOR_OK = "#8BFF3E"
 COLOR_ERROR = "#FF3E3E"
+COLOR_WARNING = "#FFC83E"
 COLOR_MUTED = "#888888"
 
 COL_SHOT, COL_STATUS, COL_VERSION, COL_FRAMES, COL_RESULT = range(5)
@@ -192,10 +193,12 @@ class DeliveryView:
         )
         item.setData(COL_SHOT, QtCore.Qt.UserRole, shot["id"])
 
-        if shot["load_error"]:
+        reason = shot["load_error"] or shot["blocked"]
+        if reason:
             # Not deliverable: show why, and don't allow checking it.
             item.setFlags(item.flags() & ~QtCore.Qt.ItemIsUserCheckable)
-            item.setText(COL_RESULT, shot["load_error"])
+            item.setText(COL_RESULT, reason)
+            item.setToolTip(COL_RESULT, reason)
             for column in range(NUM_COLUMNS):
                 item.setForeground(column, _brush(COLOR_MUTED))
         else:
@@ -280,21 +283,20 @@ class DeliveryView:
                 any_visible = any_visible or visible
             sequence_item.setHidden(not any_visible)
 
-    def set_shot_message(self, shot_id: int, message: str, error: bool = False) -> None:
+    def set_shot_message(self, shot_id: int, message: str, level: str = "ok") -> None:
+        """Sets the Result text. level: 'ok' (green), 'warning' (yellow), 'error' (red)."""
         refs = self.shot_items.get(shot_id)
         if not refs:
             return
+        color = {"warning": COLOR_WARNING, "error": COLOR_ERROR}.get(level, COLOR_OK)
         refs["item"].setText(COL_RESULT, message)
         refs["item"].setToolTip(COL_RESULT, message)
-        refs["item"].setForeground(COL_RESULT, _brush(COLOR_ERROR if error else COLOR_OK))
+        refs["item"].setForeground(COL_RESULT, _brush(color))
 
-    def set_shot_progress(self, shot_id: int, frame: int) -> None:
+    def set_shot_progress(self, shot_id: int, done: int, total: int) -> None:
         refs = self.shot_items.get(shot_id)
         if not refs:
             return
-        shot = refs["shot"]
-        total = shot["last_frame"] - shot["first_frame"] + 1
-        done = frame - shot["first_frame"] + 1
         percent = int(done * 100 / total) if total else 100
         refs["item"].setText(COL_RESULT, f"Delivering... {done}/{total} frames ({percent}%)")
         refs["item"].setForeground(COL_RESULT, _brush(COLOR_OK))

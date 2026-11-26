@@ -170,15 +170,20 @@ class DeliveryController(QtWidgets.QWidget):
             lambda shot_id, msg: self.view.set_shot_message(shot_id, msg)
         )
         self.export_thread.shot_error.connect(
-            lambda shot_id, msg: self.view.set_shot_message(shot_id, msg, error=True)
+            lambda shot_id, msg: self.view.set_shot_message(shot_id, msg, "error")
+        )
+        self.export_thread.shot_warning.connect(
+            lambda shot_id, msg: self.view.set_shot_message(shot_id, msg, "warning")
         )
         self.export_thread.shot_progress.connect(self.view.set_shot_progress)
         self.export_thread.export_finished.connect(self.export_finished)
         self.export_thread.start()
 
-    def export_finished(self, delivered: int, failed: int):
+    def export_finished(self, delivered: int, warned: int, failed: int):
         self.view.set_busy(False)
         text = f"Delivered {delivered} shot(s)."
+        if warned:
+            text += f" {warned} with warnings (yellow)."
         if failed:
             text += f" {failed} shot(s) failed, see the Result column."
         self.view.status_label.setText(text)
